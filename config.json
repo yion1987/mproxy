@@ -1,0 +1,21 @@
+{
+  "protocol": "HTTP",
+  "bind_host": "0.0.0.0",
+  "bind_port": 18000,
+  "upstream_host": "",
+  "upstream_port": 1080,
+  "timeout": 10,
+  "forward_enabled": true,
+  "forward_rules": [
+    {
+      "forward_port": 8888,
+      "target_host": "127.0.0.1",
+      "target_port": 80
+    },
+    {
+      "forward_port": 3888,
+      "target_host": "100.64.0.4",
+      "target_port": 13004
+    }
+  ]
+}
