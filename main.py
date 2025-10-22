@@ -14,6 +14,8 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 from tkinter import scrolledtext
+import pystray
+from PIL import Image, ImageDraw
 
 
 # ----------------------------
@@ -1076,21 +1078,29 @@ class MProxyApp:
         # Disable maximize, allow minimize
         self.root.resizable(False, False)
 
+        # 托盘相关变量
+        self.tray_icon = None
+        self.is_hidden = False
+
         # Set icon: prefer ICO file if available, fallback to generated PhotoImage
         try:
             ico_path = os.path.join(os.path.dirname(__file__), "assets", "icon.ico")
             if os.path.exists(ico_path):
                 self.root.iconbitmap(ico_path)
+                self.ico_path = ico_path
             else:
                 icon = generate_app_icon()
                 self.root.iconphoto(True, icon)
+                self.ico_path = None
         except Exception:
             # Graceful fallback
             try:
                 icon = generate_app_icon()
                 self.root.iconphoto(True, icon)
+                self.ico_path = None
             except Exception:
                 pass
+                self.ico_path = None
 
         # Configure grid
         self.root.columnconfigure(0, weight=1)
@@ -1271,11 +1281,116 @@ class MProxyApp:
         self.proxy_server = None
         self.forward_server = None
 
-        # Close protocol
+        # Close protocol - 绑定最小化事件
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.bind("<Unmap>", self.on_minimize)
 
         # Load and apply configuration
         self.load_and_apply_config()
+
+        # 创建托盘图标
+        self.create_tray_icon()
+
+    def create_tray_icon(self):
+        """创建系统托盘图标"""
+        # 创建托盘图标图像
+        icon_image = self._create_tray_image()
+
+        # 创建托盘菜单
+        menu = pystray.Menu(
+            pystray.MenuItem("显示主界面", self.show_window, default=True),
+            pystray.MenuItem("启动代理", self.tray_start_proxy),
+            pystray.MenuItem("停止代理", self.tray_stop_proxy),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("退出", self.tray_quit)
+        )
+
+        # 创建托盘图标对象
+        self.tray_icon = pystray.Icon("mproxy", icon_image, "MPROXY 代理服务", menu)
+
+        # 在后台线程中运行托盘图标
+        threading.Thread(target=self._run_tray_icon, daemon=True).start()
+
+    def _create_tray_image(self):
+        """创建托盘图标图像"""
+        # 尝试加载 ICO 文件
+        if self.ico_path and os.path.exists(self.ico_path):
+            try:
+                return Image.open(self.ico_path)
+            except Exception:
+                pass
+
+        # 创建一个简单的图标
+        width = 64
+        height = 64
+        image = Image.new('RGB', (width, height), color=(11, 26, 42))
+        dc = ImageDraw.Draw(image)
+
+        # 画一个圆形
+        dc.ellipse([8, 8, 56, 56], fill=(45, 127, 255), outline=(45, 127, 255))
+
+        # 画一个箭头
+        dc.polygon([(20, 24), (44, 32), (20, 40)], fill=(255, 255, 255))
+
+        return image
+
+    def _run_tray_icon(self):
+        """运行托盘图标（在后台线程中）"""
+        try:
+            self.tray_icon.run()
+        except Exception as e:
+            self.logger.error(f"托盘图标运行错误: {e}")
+
+    def on_minimize(self, event):
+        """处理窗口最小化事件"""
+        # 检查是否是最小化事件（窗口状态变为 iconic）
+        if self.root.state() == 'iconic':
+            # 延迟隐藏，确保最小化动画完成
+            self.root.after(200, self.hide_window)
+
+    def hide_window(self):
+        """隐藏主窗口到托盘"""
+        if not self.is_hidden:
+            self.root.withdraw()
+            self.is_hidden = True
+
+    def show_window(self):
+        """从托盘显示主窗口"""
+        if self.is_hidden:
+            self.root.deiconify()
+            self.root.state('normal')
+            self.root.lift()
+            self.root.focus_force()
+            self.is_hidden = False
+
+    def tray_start_proxy(self):
+        """从托盘启动代理"""
+        if not self.proxy_server:
+            self.root.after(0, self.on_start)
+
+    def tray_stop_proxy(self):
+        """从托盘停止代理"""
+        if self.proxy_server:
+            self.root.after(0, self.on_stop)
+
+    def tray_quit(self):
+        """从托盘退出程序"""
+        # 停止托盘图标
+        if self.tray_icon:
+            self.tray_icon.stop()
+        # 在主线程中关闭窗口
+        self.root.after(0, self._quit_application)
+
+    def _quit_application(self):
+        """退出应用程序"""
+        try:
+            # 保存配置后关闭
+            current_config = self.collect_current_config()
+            save_config(current_config)
+            self.on_stop()
+        except Exception:
+            pass
+        self.root.quit()
 
     def _format_bytes(self, bytes_count: int) -> str:
         """格式化字节数为可读形式"""
@@ -1746,6 +1861,11 @@ class MProxyApp:
         self.btn_stop.configure(state=tk.DISABLED)
 
     def on_close(self) -> None:
+        """处理窗口关闭事件"""
+        # 停止托盘图标
+        if self.tray_icon:
+            self.tray_icon.stop()
+
         try:
             # 保存配置后关闭
             current_config = self.collect_current_config()
