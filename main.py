@@ -84,7 +84,15 @@ class TrafficStats:
 # ----------------------------
 def get_config_path() -> str:
     """获取配置文件路径，位于程序同目录下的config.json"""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    # 判断是否为打包后的exe程序
+    if getattr(sys, 'frozen', False):
+        # 打包后，使用exe文件所在目录
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        # 开发模式，使用脚本文件所在目录
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.join(base_dir, "config.json")
 
 
 def load_config() -> dict:
