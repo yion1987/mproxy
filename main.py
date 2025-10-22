@@ -6,6 +6,7 @@ import logging
 import sys
 import os
 import json
+import time
 from typing import Optional, Tuple
 from urllib.parse import urlparse, urlsplit
 
@@ -13,6 +14,69 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import messagebox
 from tkinter import scrolledtext
+
+
+# ----------------------------
+# Traffic Statistics
+# ----------------------------
+class TrafficStats:
+    """流量统计类"""
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.upload_bytes = 0      # 总上行流量（字节）
+        self.download_bytes = 0    # 总下行流量（字节）
+        self.last_upload_bytes = 0  # 上次记录的上行流量
+        self.last_download_bytes = 0  # 上次记录的下行流量
+        self.last_update_time = time.time()
+        self.upload_speed = 0  # 上行速度（字节/秒）
+        self.download_speed = 0  # 下行速度（字节/秒）
+
+    def add_upload(self, bytes_count: int):
+        """添加上行流量"""
+        with self._lock:
+            self.upload_bytes += bytes_count
+
+    def add_download(self, bytes_count: int):
+        """添加下行流量"""
+        with self._lock:
+            self.download_bytes += bytes_count
+
+    def update_speed(self):
+        """更新速度统计"""
+        with self._lock:
+            current_time = time.time()
+            time_diff = current_time - self.last_update_time
+
+            if time_diff > 0:
+                # 计算速度（字节/秒）
+                self.upload_speed = (self.upload_bytes - self.last_upload_bytes) / time_diff
+                self.download_speed = (self.download_bytes - self.last_download_bytes) / time_diff
+
+                # 更新记录
+                self.last_upload_bytes = self.upload_bytes
+                self.last_download_bytes = self.download_bytes
+                self.last_update_time = current_time
+
+    def get_stats(self):
+        """获取统计信息"""
+        with self._lock:
+            return {
+                'upload_bytes': self.upload_bytes,
+                'download_bytes': self.download_bytes,
+                'upload_speed': self.upload_speed,
+                'download_speed': self.download_speed
+            }
+
+    def reset(self):
+        """重置统计"""
+        with self._lock:
+            self.upload_bytes = 0
+            self.download_bytes = 0
+            self.last_upload_bytes = 0
+            self.last_download_bytes = 0
+            self.last_update_time = time.time()
+            self.upload_speed = 0
+            self.download_speed = 0
 
 
 # ----------------------------
@@ -128,6 +192,7 @@ class Socks5Server:
         upstream_port: Optional[int] = None,
         timeout: int = 10,
         logger: Optional[logging.Logger] = None,
+        traffic_stats: Optional[TrafficStats] = None,
     ) -> None:
         self.bind_host = bind_host
         self.bind_port = int(bind_port)
@@ -135,6 +200,7 @@ class Socks5Server:
         self.upstream_port = int(upstream_port) if upstream_port else None
         self.timeout = int(timeout)
         self.logger = logger or logging.getLogger("mproxy")
+        self.traffic_stats = traffic_stats
 
         self._server_socket: Optional[socket.socket] = None
         self._accept_thread: Optional[threading.Thread] = None
@@ -348,8 +414,14 @@ class Socks5Server:
                     if not data:
                         return
                     if s is client:
+                        # 客户端到远程：上行
+                        if self.traffic_stats:
+                            self.traffic_stats.add_upload(len(data))
                         remote.sendall(data)
                     else:
+                        # 远程到客户端：下行
+                        if self.traffic_stats:
+                            self.traffic_stats.add_download(len(data))
                         client.sendall(data)
         finally:
             try:
@@ -370,6 +442,7 @@ class HTTPProxyServer:
         upstream_port: Optional[int] = None,
         timeout: int = 10,
         logger: Optional[logging.Logger] = None,
+        traffic_stats: Optional[TrafficStats] = None,
     ) -> None:
         self.bind_host = bind_host
         self.bind_port = int(bind_port)
@@ -377,6 +450,7 @@ class HTTPProxyServer:
         self.upstream_port = int(upstream_port) if upstream_port else None
         self.timeout = int(timeout)
         self.logger = logger or logging.getLogger("mproxy")
+        self.traffic_stats = traffic_stats
 
         self._server_socket: Optional[socket.socket] = None
         self._accept_thread: Optional[threading.Thread] = None
@@ -669,8 +743,14 @@ class HTTPProxyServer:
                     if not data:
                         return
                     if s is client:
+                        # 客户端到远程：上行
+                        if self.traffic_stats:
+                            self.traffic_stats.add_upload(len(data))
                         remote.sendall(data)
                     else:
+                        # 远程到客户端：下行
+                        if self.traffic_stats:
+                            self.traffic_stats.add_download(len(data))
                         client.sendall(data)
         finally:
             try:
@@ -1011,11 +1091,19 @@ class MProxyApp:
         main = ttk.Frame(self.root, padding=6)
         main.grid(row=0, column=0, sticky="nsew")
         main.columnconfigure(0, weight=1)
+        main.columnconfigure(1, weight=1)
         main.rowconfigure(2, weight=1)  # 让日志区域可以扩展
 
-        # === 代理服务配置 ===
-        proxy_frame = ttk.LabelFrame(main, text="代理服务配置", padding=6)
-        proxy_frame.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        # === 顶部区域：代理配置和监控面板并排 ===
+        # 创建一个容器来放置两个并排的框架
+        top_container = ttk.Frame(main)
+        top_container.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+        top_container.columnconfigure(0, weight=1)
+        top_container.columnconfigure(1, weight=1)
+
+        # === 代理服务配置 (左侧50%) ===
+        proxy_frame = ttk.LabelFrame(top_container, text="代理服务配置", padding=6)
+        proxy_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
         for i in range(4):
             proxy_frame.columnconfigure(i, weight=1)
 
@@ -1050,9 +1138,41 @@ class MProxyApp:
         self.combo_protocol = ttk.Combobox(proxy_frame, textvariable=self.protocol_var, values=["SOCKS5", "HTTP"], state="readonly", width=10)
         self.combo_protocol.grid(row=2, column=3, sticky="ew", pady=(4, 0))
 
+        # === 运行状态和流量监控 (右侧50%) ===
+        monitor_frame = ttk.LabelFrame(top_container, text="运行状态与流量监控", padding=6)
+        monitor_frame.grid(row=0, column=1, sticky="nsew", padx=(2, 0))
+        monitor_frame.columnconfigure(0, weight=1)
+        monitor_frame.columnconfigure(1, weight=1)
+
+        # 代理运行状态
+        ttk.Label(monitor_frame, text="状态:", font=("", 9, "bold")).grid(row=0, column=0, sticky="w")
+        self.status_label = ttk.Label(monitor_frame, text="未启动", foreground="gray")
+        self.status_label.grid(row=0, column=1, sticky="w", padx=(4, 0))
+
+        # 实时速度 - 紧凑布局
+        ttk.Label(monitor_frame, text="上行:", font=("", 9)).grid(row=1, column=0, sticky="w", pady=(6, 2))
+        self.upload_speed_label = ttk.Label(monitor_frame, text="0 B/s", font=("", 9))
+        self.upload_speed_label.grid(row=1, column=1, sticky="w", padx=(4, 0), pady=(6, 2))
+
+        ttk.Label(monitor_frame, text="下行:", font=("", 9)).grid(row=2, column=0, sticky="w", pady=(2, 2))
+        self.download_speed_label = ttk.Label(monitor_frame, text="0 B/s", font=("", 9))
+        self.download_speed_label.grid(row=2, column=1, sticky="w", padx=(4, 0), pady=(2, 2))
+
+        # 分隔线
+        ttk.Separator(monitor_frame, orient="horizontal").grid(row=3, column=0, columnspan=2, sticky="ew", pady=4)
+
+        # 累计流量
+        ttk.Label(monitor_frame, text="累计上行:", font=("", 9)).grid(row=4, column=0, sticky="w", pady=(2, 2))
+        self.upload_total_label = ttk.Label(monitor_frame, text="0 B", font=("", 9))
+        self.upload_total_label.grid(row=4, column=1, sticky="w", padx=(4, 0), pady=(2, 2))
+
+        ttk.Label(monitor_frame, text="累计下行:", font=("", 9)).grid(row=5, column=0, sticky="w", pady=(2, 0))
+        self.download_total_label = ttk.Label(monitor_frame, text="0 B", font=("", 9))
+        self.download_total_label.grid(row=5, column=1, sticky="w", padx=(4, 0), pady=(2, 0))
+
         # === 端口转发配置 ===
         forward_frame = ttk.LabelFrame(main, text="端口转发配置", padding=6)
-        forward_frame.grid(row=1, column=0, sticky="ew", pady=4)
+        forward_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=4)
         forward_frame.columnconfigure(0, weight=1)
 
         # 启用端口转发复选框和按钮在同一行
@@ -1111,7 +1231,7 @@ class MProxyApp:
 
         # 启动/停止按钮 - 放在日志区域上方
         button_frame = ttk.Frame(main)
-        button_frame.grid(row=2, column=0, sticky="ew", pady=(4, 4))
+        button_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 4))
         button_frame.columnconfigure(0, weight=1)
         button_frame.columnconfigure(1, weight=1)
 
@@ -1123,7 +1243,7 @@ class MProxyApp:
         # Log window - 调整高度以适应600px窗口
         self.log_text = scrolledtext.ScrolledText(main, height=15, bg="black", fg="#C0FFC0", insertbackground="#C0FFC0")
         self.log_text.configure(font=("Consolas", 9))
-        self.log_text.grid(row=3, column=0, sticky="nsew", pady=(0, 0))
+        self.log_text.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 0))
         main.rowconfigure(3, weight=1)
 
         # Logger
@@ -1135,6 +1255,10 @@ class MProxyApp:
         self.logger.handlers.clear()
         self.logger.addHandler(handler)
 
+        # Traffic statistics
+        self.traffic_stats = TrafficStats()
+        self._update_timer = None
+
         # Server instances
         self.proxy_server = None
         self.forward_server = None
@@ -1144,6 +1268,47 @@ class MProxyApp:
 
         # Load and apply configuration
         self.load_and_apply_config()
+
+    def _format_bytes(self, bytes_count: int) -> str:
+        """格式化字节数为可读形式"""
+        if bytes_count < 1024:
+            return f"{bytes_count} B"
+        elif bytes_count < 1024 * 1024:
+            return f"{bytes_count / 1024:.2f} KB"
+        elif bytes_count < 1024 * 1024 * 1024:
+            return f"{bytes_count / (1024 * 1024):.2f} MB"
+        else:
+            return f"{bytes_count / (1024 * 1024 * 1024):.2f} GB"
+
+    def _format_speed(self, bytes_per_second: float) -> str:
+        """格式化速度为可读形式"""
+        if bytes_per_second < 1024:
+            return f"{bytes_per_second:.2f} B/s"
+        elif bytes_per_second < 1024 * 1024:
+            return f"{bytes_per_second / 1024:.2f} KB/s"
+        else:
+            return f"{bytes_per_second / (1024 * 1024):.2f} MB/s"
+
+    def _update_traffic_display(self):
+        """更新流量显示"""
+        if self.proxy_server:
+            # 更新速度统计
+            self.traffic_stats.update_speed()
+            stats = self.traffic_stats.get_stats()
+
+            # 更新实时速度
+            self.upload_speed_label.config(text=self._format_speed(stats['upload_speed']))
+            self.download_speed_label.config(text=self._format_speed(stats['download_speed']))
+
+            # 更新累计流量
+            self.upload_total_label.config(text=self._format_bytes(stats['upload_bytes']))
+            self.download_total_label.config(text=self._format_bytes(stats['download_bytes']))
+
+            # 继续更新
+            self._update_timer = self.root.after(1000, self._update_traffic_display)
+        else:
+            # 服务已停止，重置显示
+            self._update_timer = None
 
     def _toggle_forward_controls(self) -> None:
         """切换端口转发控件的启用/禁用状态"""
@@ -1410,15 +1575,18 @@ class MProxyApp:
             self.root.after(0, lambda: self.btn_start.configure(state=tk.NORMAL))
             self.root.after(0, lambda: self.btn_stop.configure(state=tk.DISABLED))
             return
-        
+
         try:
+            # 重置流量统计
+            self.traffic_stats.reset()
+
             # 保存当前配置
             current_config = self.collect_current_config()
             save_config(current_config)
-            
+
             # 在主线程中禁用所有配置控件
             self.root.after(0, lambda: self._set_controls_state(False))
-            
+
             # 启动代理服务
             protocol = (self.protocol_var.get() or "SOCKS5").upper()
             if protocol == "HTTP":
@@ -1429,6 +1597,7 @@ class MProxyApp:
                     upstream_port=up_port,
                     timeout=timeout,
                     logger=self.logger,
+                    traffic_stats=self.traffic_stats,
                 )
             else:
                 self.proxy_server = Socks5Server(
@@ -1438,11 +1607,18 @@ class MProxyApp:
                     upstream_port=up_port,
                     timeout=timeout,
                     logger=self.logger,
+                    traffic_stats=self.traffic_stats,
                 )
-            
+
             # 启动代理服务
             self.proxy_server.start()
             self.logger.info(f"代理服务已启动: {protocol} {bind_host}:{bind_port}")
+
+            # 更新状态标签
+            self.root.after(0, lambda: self.status_label.config(text="运行中", foreground="green"))
+
+            # 启动流量监控更新
+            self.root.after(0, self._update_traffic_display)
             
             # 启动端口转发服务（如果启用）
             if self.forward_enabled_var.get():
@@ -1515,12 +1691,26 @@ class MProxyApp:
 
     def on_stop(self) -> None:
         """停止代理服务和端口转发服务"""
+        # 停止流量更新定时器
+        if self._update_timer:
+            self.root.after_cancel(self._update_timer)
+            self._update_timer = None
+
         # 停止代理服务
         if self.proxy_server:
             self.proxy_server.stop()
             self.proxy_server = None
             self.logger.info("代理服务已停止")
-        
+
+        # 更新状态标签
+        self.status_label.config(text="未启动", foreground="gray")
+
+        # 重置流量显示
+        self.upload_speed_label.config(text="0 B/s")
+        self.download_speed_label.config(text="0 B/s")
+        self.upload_total_label.config(text="0 B")
+        self.download_total_label.config(text="0 B")
+
         # 停止所有端口转发服务
         for rule in self.forward_rules:
             if rule["server"] and rule["status"] == "运行中":
@@ -1533,17 +1723,17 @@ class MProxyApp:
                     rule["status"] = "停止失败"
                 finally:
                     rule["server"] = None
-        
+
         # 刷新显示
         self._refresh_forward_rules_display()
-        
+
         # 重新启用所有配置控件
         self._set_controls_state(True)
-        
+
         # 保存当前配置
         current_config = self.collect_current_config()
         save_config(current_config)
-        
+
         self.btn_start.configure(state=tk.NORMAL)
         self.btn_stop.configure(state=tk.DISABLED)
 
